@@ -1,0 +1,442 @@
+---
+title: "Crime Prediction Project - CSP 571"
+author: |
+  Dhruv Hiteshkumar Arora 
+  Devarsh Prashant Kale  
+  Harsh Hiteshkumar Patel  
+output: pdf_document
+date: "`r Sys.Date()`"
+---
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(caret)
+library(randomForest)
+library(xgboost)
+library(ggplot2)
+library(e1071)
+library(yardstick)
+```
+
+
+
+### 1. INTRODUCTION
+
+
+Introduction
+
+The goal of this project is to analyze and predict arrest outcomes using crime data published by the City of Chicago.
+The dataset consists of several variables capturing the type of crime, time and location details, and whether the crime led to an arrest.
+
+The primary objective is to create machine learning models that can predict the likelihood of an arrest based on available information at the time of crime reporting. This analysis involves data cleaning, exploratory data analysis (EDA), feature engineering, model training, evaluation, and result interpretation.
+
+We aim to identify key factors influencing arrest decisions and compare model performance to evaluate which approach offers the best balance of interpretability and accuracy.
+
+
+### 2. LOAD DATA + INITIAL VIEW
+
+
+```{r}
+# Load Cleaned Data
+
+crime <- read_csv("../data/processed/cleaned_crime_data.csv")
+
+# Overview
+glimpse(crime)
+summary(crime)
+```
+
+### 3. EXPLORATORY DATA ANALYSIS – TIME-BASED TRENDS
+
+
+In this section, we explore how crime frequency varies over time. We examine trends by **year**, **month**, and **hour of the day** to identify when crimes are most likely to occur.
+
+#### 3.1 Crimes per Year
+
+
+This plot shows the number of crimes reported in each year from 2022 to 2024. This helps us identify any rising or falling trends over time.
+
+```{r}
+crime %>%
+  count(Year) %>%
+  ggplot(aes(x = factor(Year), y = n)) +
+  geom_bar(stat = "identity", fill = "#0073C2FF") +
+  labs(title = "Number of Crimes Reported by Year",
+       x = "Year", y = "Number of Crimes") +
+  theme_minimal()
+```
+
+Crime incidents slightly increased from 2022 to 2023 and remained consistent through 2024, indicating a steady high volume of criminal activity across years.
+
+
+#### 3.2 Crimes by Month
+
+
+Crime counts are plotted by month to understand seasonal variations. Spikes in specific months may indicate seasonal patterns or major events.
+
+```{r}
+crime %>%
+  count(Month) %>%
+  ggplot(aes(x = factor(Month), y = n)) +
+  geom_bar(stat = "identity", fill = "#EFC000FF") +
+  labs(title = "Number of Crimes by Month",
+       x = "Month", y = "Crime Count") +
+  theme_minimal()
+```
+
+July showed the highest crime rate, suggesting increased activity during summer months. Winter months (especially February) had noticeably fewer crimes.
+
+
+
+#### 3.3 Crimes by Hour of the Day
+
+
+This chart shows the distribution of crimes over the 24-hour day, helping us understand what times crimes are most frequently reported.
+
+```{r}
+crime %>%
+  count(Hour) %>%
+  ggplot(aes(x = factor(Hour), y = n)) +
+  geom_bar(stat = "identity", fill = "#868686FF") +
+  labs(title = "Distribution of Crimes by Hour",
+       x = "Hour of the Day", y = "Number of Crimes") +
+  theme_minimal()
+```
+
+Crimes peaked around midnight and noon. Very low activity was seen between 3–6 AM. This shows heightened activity during both early and late hours of the day.
+
+
+#### 3.4 Top 10 Crime Types 
+
+
+To understand the most frequent types of crimes reported in Chicago, we analyze the distribution of offenses by category. This helps identify which crime types are most common and where law enforcement might need to focus resources.
+
+```{r}
+crime %>%
+  count(`Primary Type`, sort = TRUE) %>%
+  slice_max(n, n = 10) %>%
+  ggplot(aes(x = reorder(`Primary Type`, n), y = n)) +
+  geom_col(fill = "#F8766D") +
+  coord_flip() +
+  labs(title = "Top 10 Most Common Crime Types",
+       x = "Crime Type", y = "Number of Crimes") +
+  theme_minimal()
+```
+
+The most frequent crime was Theft, followed by Battery and Criminal Damage. These top 3 crime types together accounted for a significant portion of all reported incidents.
+
+
+
+#### 3.5 Top 10 Crime Locations
+
+
+This plot shows the top 10 most frequent locations where crimes were reported. Analyzing location types (e.g., street, residence, alley) helps reveal environmental risk factors and public safety priorities.
+
+```{r}
+crime %>%
+  count(`Location Description`, sort = TRUE) %>%
+  slice_max(n, n = 10) %>%
+  ggplot(aes(x = reorder(`Location Description`, n), y = n)) +
+  geom_col(fill = "#00BFC4") +
+  coord_flip() +
+  labs(title = "Top 10 Crime Locations",
+       x = "Location Type", y = "Number of Crimes") +
+  theme_minimal()
+```
+
+Most crimes occurred on streets, followed by apartments and residences. Public spaces and private housing were consistently high-risk zones.
+
+
+#### 3.6 Correlation Heatmap
+
+
+To assess how numerical features relate to each other, we use a correlation matrix. This helps us identify multicollinearity between variables and whether any predictors have strong linear relationships with the target variable (e.g., Arrest).
+
+```{r}
+numeric_vars <- crime %>%
+  select(where(is.numeric)) %>%
+  select(-any_of(c("X Coordinate", "Y Coordinate", "Latitude", "Longitude", "Zip Codes")))
+
+# Compute correlation matrix
+cor_matrix <- round(cor(numeric_vars, use = "complete.obs"), 2)
+
+# Load corrplot library and plot heatmap
+library(corrplot)
+
+corrplot::corrplot(cor_matrix, method = "color",
+                   type = "upper", tl.col = "black", tl.cex = 0.8,
+                   addCoef.col = "black", number.cex = 0.7,
+                   title = "Correlation Heatmap of Numeric Variables")
+```
+
+No strong correlations were observed among most numeric features. District, Beat, and Ward showed moderate correlations, while Arrest and Domestic had a minor positive association.
+
+
+
+### 4. Feature Engineering & Model Preparation
+
+
+To train machine learning models, we need to prepare the data into a numeric format that models can interpret. This includes selecting important features, encoding categorical variables, and splitting the dataset into training and testing sets.
+
+In this project, we focus on time-based features (`Year`, `Month`, `Hour`), binary flags (`Arrest`, `Domestic`), and categorical fields (`Primary Type`, `Location Description`). To reduce noise and complexity, we filter only the top 10 most frequent values in the categorical columns.
+
+
+
+#### 4.1 Filter and Encode Categorical Variables
+
+
+```{r}
+# Convert binary fields to factors
+crime$Arrest <- as.factor(crime$Arrest)
+crime$Domestic <- as.factor(crime$Domestic)
+
+# Keep only top 10 crime types and top 10 locations
+top_types <- names(sort(table(crime$`Primary Type`), decreasing = TRUE)[1:10])
+top_locs <- names(sort(table(crime$`Location Description`), decreasing = TRUE)[1:10])
+
+crime_filtered <- crime %>%
+  filter(`Primary Type` %in% top_types,
+         `Location Description` %in% top_locs) %>%
+  select(Arrest, Year, Month, Hour, Domestic, `Primary Type`, `Location Description`)
+
+# Convert to factors
+crime_filtered <- crime_filtered %>%
+  mutate(across(c(Domestic, `Primary Type`, `Location Description`), as.factor))
+
+# Create model matrix (one-hot encoding)
+df_model <- model.matrix(Arrest ~ . - 1, data = crime_filtered) %>% as.data.frame()
+
+# Reattach target variable
+df_model$Arrest <- crime_filtered$Arrest
+```
+
+#### 4.2 Train-Test Split
+
+
+We now split the dataset into 80% for training and 20% for testing. This ensures that our model evaluations are based on unseen data.
+
+```{r}
+set.seed(42)
+
+split <- createDataPartition(df_model$Arrest, p = 0.8, list = FALSE)
+train_data <- df_model[split, ]
+test_data <- df_model[-split, ]
+
+# Confirm dimensions
+cat("Training Size:", nrow(train_data), " | Test Size:", nrow(test_data))
+```
+
+
+### 5. Model Training & Evaluation
+
+
+We now train and evaluate three classification models to predict whether a crime will result in an arrest:
+- Logistic Regression
+- Random Forest
+- XGBoost
+
+Each model is trained on 80% of the data and evaluated on the remaining 20%. Metrics such as accuracy, precision, recall, and F1-score are used to compare their performance.
+
+#### 5.1 Logistic Regression
+
+```{r model-logistic}
+# Prepare data
+x_log <- train_data[, -ncol(train_data)]
+y_log <- train_data$Arrest
+x_test <- test_data[, -ncol(test_data)]
+y_test <- test_data$Arrest
+
+# Logistic Regression Model
+log_model <- glm(y_log ~ ., data = data.frame(x_log, y_log), family = "binomial")
+
+# Predict
+log_probs <- predict(log_model, newdata = data.frame(x_test), type = "response")
+log_preds <- ifelse(log_probs > 0.5, "1", "0")
+
+# Format for evaluation
+log_preds <- factor(log_preds, levels = c("0", "1"))
+y_test_fct <- factor(y_test, levels = c("0", "1"))
+
+# Confusion Matrix
+confusionMatrix(log_preds, y_test_fct, positive = "1")
+```
+
+- Accuracy: 91.12%
+
+- Sensitivity: 21.3%
+
+- Precision (for arrests): 63.3%
+
+Logistic regression showed strong performance overall, though it struggled to detect true positives (arrests). Still, it offered a solid baseline model.
+
+#### 5.2 Random Forest
+
+
+```{r}
+colnames(train_data) <- make.names(colnames(train_data))
+colnames(test_data)  <- make.names(colnames(test_data))
+
+# Prepare features and labels
+x_log <- train_data[, -ncol(train_data)]
+y_log <- train_data$Arrest
+
+x_test <- test_data[, -ncol(test_data)]
+y_test <- test_data$Arrest
+
+# Recreate y_test factor
+y_test_fct <- factor(y_test, levels = c("0", "1"))
+
+# Random Forest with clean data
+rf_model <- randomForest(x = x_log, y = y_log, ntree = 100, importance = TRUE)
+rf_preds <- predict(rf_model, newdata = x_test)
+
+rf_preds <- factor(rf_preds, levels = c("0", "1"))
+confusionMatrix(rf_preds, y_test_fct, positive = "1")
+
+# Get feature importance
+imp_df <- as.data.frame(importance(rf_model))
+imp_df$Feature <- rownames(imp_df)
+
+# Sort by MeanDecreaseGini and get top 10
+top10_features <- imp_df[order(-imp_df$MeanDecreaseGini), ][1:10, ]
+
+# Print top 10
+print(top10_features)
+
+# Plot top 10 important features
+library(ggplot2)
+
+ggplot(top10_features, aes(x = reorder(Feature, MeanDecreaseGini), y = MeanDecreaseGini)) +
+  geom_col(fill = "darkgreen") +
+  coord_flip() +
+  labs(title = "Top 10 Important Features (Random Forest)",
+       x = "Feature", y = "Mean Decrease in Gini") +
+  theme_minimal()
+```
+
+- Accuracy: 91.45%
+
+- Sensitivity: 19.0%
+
+- Precision (for arrests): 73.9%
+
+Random forest performed well in terms of accuracy and precision but had the lowest sensitivity of the three, indicating class imbalance challenges.
+
+
+#### 5.3 XGBoost
+
+
+XGBoost is an optimized gradient boosting algorithm. It’s often very effective for structured/tabular data. We convert our data to matrix format using `xgb.DMatrix()` and predict the probability of arrest.
+
+```{r}
+# Convert x and y to XGBoost format
+xgb_train <- xgb.DMatrix(data = as.matrix(x_log), label = as.numeric(y_log) - 1)
+xgb_test  <- xgb.DMatrix(data = as.matrix(x_test))
+
+# Train XGBoost model
+xgb_model <- xgboost(data = xgb_train, nrounds = 50, objective = "binary:logistic", verbose = 0)
+
+# Predict and classify
+xgb_probs <- predict(xgb_model, xgb_test)
+xgb_preds <- ifelse(xgb_probs > 0.5, "1", "0")
+
+# Evaluate
+xgb_preds <- factor(xgb_preds, levels = c("0", "1"))
+confusionMatrix(xgb_preds, y_test_fct, positive = "1")
+```
+
+- Accuracy: 91.55%
+
+- Sensitivity: 24.6%
+
+- Precision (for arrests): 68.6%
+
+XGBoost achieved the highest accuracy and best balance between sensitivity and specificity, making it the most reliable model among the three.
+
+#### 5.4 Model Accuracy Comparison
+
+
+The following chart compares model accuracy based on our test dataset results:
+
+- Logistic Regression: 91.12%
+- Random Forest: 91.45%
+- XGBoost: 91.55%
+
+```{r}
+acc_log <- 0.9112
+acc_rf  <- 0.9145
+acc_xgb <- 0.9155
+
+model_acc <- tibble(
+  Model = c("Logistic Regression", "Random Forest", "XGBoost"),
+  Accuracy = c(acc_log, acc_rf, acc_xgb)
+)
+
+ggplot(model_acc, aes(x = Model, y = Accuracy)) +
+  geom_col(fill = "#619CFF", width = 0.6) +
+  geom_text(aes(label = paste0(round(Accuracy * 100, 2), "%")),
+            vjust = -0.5, size = 4) +
+  labs(title = "Model Accuracy Comparison",
+       y = "Accuracy", x = NULL) +
+  theme_minimal(base_size = 12)
+```
+
+### 6. Conclusion & Recommendations
+
+This project aimed to build a predictive model for determining whether a crime incident in Chicago would lead to an arrest, using open public data. Through extensive data cleaning, exploratory analysis, and supervised learning techniques, we developed and evaluated three classification models: Logistic Regression, Random Forest, and XGBoost.
+
+**Key Findings:**
+
+- **XGBoost** delivered the best accuracy (91.55%) and most balanced sensitivity (24.6%), indicating it performed best at predicting true arrest outcomes.
+
+- **Random Forest** had slightly lower sensitivity but higher precision (73.9%), meaning it made fewer false arrest predictions.
+
+- **Logistic Regression** offered interpretability and solid performance with 91.12% accuracy, making it a strong baseline model.
+
+**EDA Insights:**
+
+- Midnight and noon hours had the highest number of reported crimes.
+
+- Theft, Battery, and Criminal Damage were the most frequent crime types.
+
+- Most crimes occurred on streets, followed by apartments and residences.
+
+- Time-based features and crime categories contributed significantly to model performance.
+
+**Recommendations:**
+
+- Handle class imbalance using techniques like SMOTE or oversampling.
+
+- Introduce geographic clustering (e.g., crime hotspots).
+
+- Incorporate external data like socio-economic indicators, weather, and events.
+
+- Deploy interactive dashboards using Power BI or Tableau for easier insights.
+
+This analysis demonstrates how publicly available data can be transformed into actionable insights for public safety and operational efficiency.
+
+
+
+### 7. References
+
+1. City of Chicago. (2024). *Crimes - 2001 to Present* [Dataset]. Retrieved from:  
+   https://data.cityofchicago.org/Public-Safety/Crimes-2001-to-Present/ijzp-q8t2
+
+2. James, G., Witten, D., Hastie, T., & Tibshirani, R. (2021). *An Introduction to Statistical Learning with Applications in R* (2nd ed.). Springer. ISBN: 978-1-0716-1418-1
+
+3. Chen, T., & Guestrin, C. (2016). *XGBoost: A Scalable Tree Boosting System*.  
+   Proceedings of the 22nd ACM SIGKDD Conference, 785–794. https://doi.org/10.1145/2939672.2939785
+
+4. Kuhn, M., & Johnson, K. (2013). *Applied Predictive Modeling*. Springer. https://doi.org/10.1007/978-1-4614-6849-3
+
+5. Breiman, L. (2001). *Random Forests*. Machine Learning, 45(1), 5–32. https://doi.org/10.1023/A:1010933404324
+
+6. Hothorn, T., Hornik, K., & Zeileis, A. (2006). *Unbiased Recursive Partitioning: A Conditional Inference Framework*.  
+   Journal of Computational and Graphical Statistics, 15(3), 651–674. https://doi.org/10.1198/106186006X133933
+
+7. Chawla, N. V., Bowyer, K. W., Hall, L. O., & Kegelmeyer, W. P. (2002). *SMOTE: Synthetic Minority Over-sampling Technique*.  
+   Journal of Artificial Intelligence Research, 16, 321–357. https://doi.org/10.1613/jair.953
+
+
+
