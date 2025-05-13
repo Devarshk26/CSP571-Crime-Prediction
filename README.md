@@ -12,7 +12,6 @@ Team Members:
 ## Structure
 - `data/raw/` — Original data files
 - `data/processed/` — Cleaned/merged data
-- `notebooks/` — Jupyter notebooks
-- `scripts/` — Python or R scripts
+- `scripts/` —  R scripts
 - `visuals/` — Graphs, charts, figures
 - `report/` — Final report, presentation slides
